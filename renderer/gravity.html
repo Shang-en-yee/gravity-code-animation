@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>引力 · 广义相对论</title>
+<style>
+  :root{
+    --bg:#08090F; --ink:#E6DCCB; --dim:#8A8177; --accent:#E0813C; --cool:#5B8FD6;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:#000;overflow:hidden;
+    font-family:"Microsoft YaHei","PingFang SC",sans-serif;-webkit-font-smoothing:antialiased}
+  #viewport{position:absolute;inset:0 0 56px 0;display:flex;align-items:center;justify-content:center}
+  #stage{width:1920px;height:1080px;position:relative;overflow:hidden;background:var(--bg);
+    transform-origin:center center;flex:none}
+  canvas{position:absolute;inset:0;width:1920px;height:1080px}
+  #cvBg{z-index:1}
+  #cvMid{z-index:2}
+  #cvFx{z-index:5;pointer-events:none}
+  #cvGrain{z-index:9;pointer-events:none}
+  #camera{position:absolute;inset:0;transform-origin:50% 50%}
+  #text,#sub{z-index:4;position:absolute;inset:0}
+  #vignette{position:absolute;inset:0;z-index:6;pointer-events:none;
+    background:radial-gradient(130% 105% at 50% 48%,transparent 48%,rgba(0,0,0,.55) 100%)}
+
+  /* 章节小标 */
+  #chapter{position:absolute;left:110px;top:84px;z-index:7;display:flex;align-items:baseline;gap:20px;opacity:0}
+  #chapter .num{font-family:Consolas,monospace;font-size:22px;color:var(--accent);letter-spacing:.2em}
+  #chapter .cn{font-size:20px;color:var(--ink);letter-spacing:.18em}
+  #chapter .en{font-size:13px;color:var(--dim);letter-spacing:.36em;text-transform:uppercase}
+
+  /* 大标题 */
+  .big-cn{position:absolute;left:0;right:0;text-align:center;color:var(--ink);
+    font-weight:800;letter-spacing:.06em;line-height:1.15;
+    text-shadow:0 0 60px rgba(224,129,60,.35),0 0 140px rgba(224,129,60,.14)}
+  .big-en{position:absolute;left:0;right:0;text-align:center;color:var(--dim);
+    font-family:Consolas,monospace;letter-spacing:.5em;text-transform:uppercase}
+
+  /* 公式 / 数据 */
+  .formula{position:absolute;color:var(--ink);font-family:"Cambria Math",Georgia,serif;
+    font-size:66px;letter-spacing:.02em;opacity:0}
+  .formula sub{font-size:.55em}
+  .note{position:absolute;color:var(--dim);font-size:24px;letter-spacing:.22em;
+    font-family:Consolas,monospace}
+
+  /* 字幕 */
+  #sub{display:flex;align-items:flex-end;justify-content:center}
+  #sub .line{position:absolute;left:0;right:0;bottom:104px;text-align:center;
+    font-size:44px;color:var(--ink);letter-spacing:.05em;padding:0 180px;line-height:1.55}
+
+  /* UI */
+  #ui{position:absolute;left:0;right:0;bottom:0;height:56px;background:#0B0C10;
+    border-top:1px solid #1B1D24;display:flex;align-items:center;gap:16px;padding:0 20px;
+    color:#8B8478;font-size:13px;font-family:Consolas,monospace}
+  #ui button{background:#171922;border:1px solid #262A36;color:#CFC6BA;border-radius:5px;
+    padding:5px 12px;cursor:pointer;font-family:inherit;font-size:13px}
+  #ui input[type=range]{flex:1;accent-color:#E0813C;cursor:pointer}
+  #ui .val{min-width:170px;text-align:right}
+  body.export #ui{display:none}
+  body.export #viewport{inset:0}
+  body.export #stage{transform:none}
+</style>
+</head>
+<body>
+<div id="viewport">
+  <div id="stage">
+    <div id="camera">
+      <canvas id="cvBg" width="1920" height="1080"></canvas>
+      <canvas id="cvMid" width="1920" height="1080"></canvas>
+      <canvas id="cvFx" width="1920" height="1080"></canvas>
+      <div id="text"></div>
+      <div id="sub"></div>
+      <div id="vignette"></div>
+      <div id="chapter"><span class="num"></span><span class="cn"></span><span class="en"></span></div>
+    </div>
+    <canvas id="cvGrain" width="1920" height="1080"></canvas>
+  </div>
+</div>
+<div id="ui">
+  <button id="play">暂停</button>
+  <button id="prev">◀</button>
+  <button id="next">▶</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0">
+  <div class="val" id="val">0.00s</div>
+</div>
+
+<script>
+"use strict";
+/* ==========================================================================
+   引力 · 广义相对论
+   两分钟，八章。全部画面是 t 的纯函数，可逐帧复现。
+   ========================================================================== */
+
+const W = 1920, H = 1080, CX = 960, CY = 540;
+
+const P = { bg:'#08090F', ink:'#E6DCCB', dim:'#8A8177', accent:'#E0813C', cool:'#5B8FD6' };
+
+/* ------------------------------------------------------------------ math */
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const seg = (t, s, d) => clamp01((t - s) / d);
+const lerp = (a, b, p) => a + (b - a) * p;
+const easeOut = p => 1 - Math.pow(1 - p, 3);
+const easeExpo = p => p === 1 ? 1 : 1 - Math.pow(2, -10 * p);
+const easeInOut = p => p < .5 ? 4*p*p*p : 1 - Math.pow(-2*p+2,3)/2;
+
+function rng(seed){ let s = seed >>> 0; return () => {
+  s |= 0; s = s + 0x6D2B79F5 | 0;
+  let t = Math.imul(s ^ s >>> 15, 1 | s);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+};}
+
+/* ------------------------------------------------------------------ 相机 */
+function makeCam(o){ return Object.assign({yaw:0, pitch:-0.62, dist:8.2, f:1050, roll:0}, o); }
+
+function proj(cam, x, y, z){
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  let X =  x*cy + z*sy;
+  let Z = -x*sy + z*cy;
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  let Y  =  y*cp - Z*sp;
+  let Z2 =  y*sp + Z*cp;
+  const d = Z2 + cam.dist;
+  if (d <= 0.08) return null;
+  const s = cam.f / d;
+  return [CX + X*s, CY - Y*s, d];
+}
+
+/* --------------------------------------------------------------- 星场 */
+function makeStars(seed, n, spread){
+  const r = rng(seed), a = [];
+  for (let i = 0; i < n; i++){
+    a.push({ x:(r()-.5)*spread, y:(r()-.5)*spread*0.62, z:(r()*1.0-.55)*6-1,
+             s:.5+r()*1.8, ph:r()*Math.PI*2, sp:.4+r()*1.4 });
+  }
+  return a;
+}
+const STARS_FAR = makeStars(20261121, 190, 8.0);
+const STARS_MID = makeStars(990133, 80, 6.4);
+
+// 屏幕空间的浮尘：独立漂移，制造"整幅画面在动"
+const DUST = (() => {
+  const r = rng(4477), a = [];
+  for (let i = 0; i < 210; i++){
+    a.push({ x:r()*W, y:r()*H, vx:(r()-.35)*16, vy:(r()-.55)*11,
+             r:.6+r()*2.4, a:.10+r()*.30, tw:.5+r()*1.8, ph:r()*7 });
+  }
+  return a;
+})();
+
+function drawStarLayer(ctx, list, t, speed, color, alpha){
+  const c = makeCam({ yaw: t*speed });
+  for (const st of list){
+    const p = proj(c, st.x, st.y, st.z);
+    if (!p) continue;
+    const [sx, sy, d] = p;
+    if (sx < -60 || sx > W+60 || sy < -60 || sy > H+60) continue;
+    const a = clamp01(1.35 - d*0.16) * (0.55 + 0.45*Math.sin(t*st.sp + st.ph)) * alpha;
+    ctx.globalAlpha = Math.max(0, a);
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(sx, sy, st.s * (5.2/d), 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawDust(ctx, t){
+  ctx.globalCompositeOperation = 'lighter';
+  for (const d of DUST){
+    let x = (d.x + d.vx*t) % W; if (x < 0) x += W;
+    let y = (d.y + d.vy*t) % H; if (y < 0) y += H;
+    const a = d.a * (0.55 + 0.45*Math.sin(t*d.tw + d.ph));
+    ctx.fillStyle = `rgba(196,212,238,${a.toFixed(3)})`;
+    ctx.beginPath(); ctx.arc(x, y, d.r, 0, 7); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+
+// 背景结构：全屏点阵 + 缓慢漂移的星云。目的不是被看见，而是让画面没有"空"
+function drawBgStructure(ctx, t){
+  const sp = 64;
+  const ox = (t * 9) % sp, oy = (t * 5) % sp;
+  ctx.fillStyle = 'rgba(150,168,196,0.085)';
+  for (let y = -sp; y < H + sp; y += sp){
+    for (let x = -sp; x < W + sp; x += sp){
+      ctx.beginPath(); ctx.arc(x + ox, y + oy, 1.15, 0, 7); ctx.fill();
+    }
+  }
+  // 星云：三个大而淡的径向渐变，缓慢漂移
+  const blobs = [
+    [0.28, 0.34, 620, 'rgba(58,74,110,0.26)', 0.013],
+    [0.72, 0.62, 720, 'rgba(94,66,52,0.22)', -0.010],
+    [0.52, 0.20, 520, 'rgba(46,60,92,0.19)', 0.007]
+  ];
+  for (let i = 0; i < blobs.length; i++){
+    const [bx, by, br, col, dr] = blobs[i];
+    const cx = W*bx + Math.sin(t*dr + i*2.1) * 120;
+    const cy = H*by + Math.cos(t*dr*1.3 + i*1.7) * 90;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, br);
+    g.addColorStop(0, col);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, br, 0, 7); ctx.fill();
+  }
+}
+
+function drawStars(ctx, t){
+  ctx.clearRect(0,0,W,H);
+  drawBgStructure(ctx, t);
+  // 真 3D 深空：相机缓慢环绕，粒子按深度排序并做虚焦
+  const cam3 = makeCam({ yaw: t*0.012, pitch: -0.10, dist: 9.5, f: 1150 });
+  drawField3D(ctx, cam3, FIELD_STARS, t, 9.5);
+  drawStarLayer(ctx, STARS_MID, t, 0.017, '#D9E2F2', 0.9);
+  drawDust(ctx, t);
+}
+
+/* ------------------------------------------------------- 时空网格（核心） */
+function gridHeight(x, z, k){
+  const r = Math.hypot(x, z);
+  return -k / (r + 0.55) + 0.62;
+}
+
+function drawWarpGrid(ctx, t, cam, opt){
+  ctx.clearRect(0,0,W,H);
+  const N = opt.n || 34, ext = opt.ext || 5.4, k = opt.k || 1.15;
+  const glow = opt.glow !== false;
+
+  // 顶点预计算
+  const L = [], R = [];
+  const step = (ext*2)/N;
+  for (let i = 0; i <= N; i++){
+    const a = -ext + i*step;
+    const lineA = [], lineB = [];
+    for (let j = 0; j <= N; j++){
+      const b = -ext + j*step;
+      lineA.push(proj(cam, a, gridHeight(a, b, k), b));
+      lineB.push(proj(cam, b, gridHeight(b, a, k), a));
+    }
+    L.push(lineA); R.push(lineB);
+  }
+
+  const stroke = (lines, base) => {
+    for (const ln of lines){
+      ctx.beginPath();
+      let started = false;
+      for (const p of ln){
+        if (!p){ started = false; continue; }
+        if (!started){ ctx.moveTo(p[0], p[1]); started = true; }
+        else ctx.lineTo(p[0], p[1]);
+      }
+      ctx.strokeStyle = base;
+      ctx.stroke();
+    }
+  };
+
+  if (glow){
+    // 用"粗线低透明度"伪造辉光：比 ctx.filter 的 blur 快一个数量级
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 4;
+    stroke(L, 'rgba(224,129,60,0.10)');
+    stroke(R, 'rgba(224,129,60,0.10)');
+    ctx.restore();
+    ctx.lineWidth = 1.5;
+  }
+  stroke(L, 'rgba(210,196,172,0.30)');
+  stroke(R, 'rgba(210,196,172,0.30)');
+
+  // 边缘径向渐隐，避免出现"悬浮的方板"
+  ctx.globalCompositeOperation = 'destination-in';
+  const m = ctx.createRadialGradient(CX, CY+60, 120, CX, CY+60, 980);
+  m.addColorStop(0, 'rgba(0,0,0,1)');
+  m.addColorStop(0.55,'rgba(0,0,0,1)');
+  m.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = m; ctx.fillRect(0,0,W,H);
+  ctx.globalCompositeOperation = 'source-over';
+
+  // 中心能核
+  const c = proj(cam, 0, gridHeight(0,0,k), 0);
+  if (c){
+    const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], 190);
+    g.addColorStop(0, 'rgba(255,196,132,0.95)');
+    g.addColorStop(0.25,'rgba(224,129,60,0.42)');
+    g.addColorStop(1, 'rgba(224,129,60,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(c[0], c[1], 190, 0, 7); ctx.fill();
+    ctx.fillStyle = '#FFF1DC';
+    ctx.beginPath(); ctx.arc(c[0], c[1], 9, 0, 7); ctx.fill();
+  }
+  return c;
+}
+
+/* ------------------------------------------------------------- 轨道 / 进动 */
+function drawOrbit(ctx, t, opt){
+  const cx = opt.cx || CX, cy = opt.cy || CY;
+  const a = opt.a || 340, b = opt.b || 210, rot = opt.rot || -0.42;
+  const p = easeInOut(seg(t, 0.1, 1.7));
+  const cr = Math.cos(rot), sr = Math.sin(rot);
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // 轨道
+  ctx.beginPath();
+  const steps = 220, upto = Math.floor(steps * p);
+  for (let i = 0; i <= upto; i++){
+    const th = (i/steps) * Math.PI*2;
+    const X = Math.cos(th)*a, Y = Math.sin(th)*b;
+    const x = X*cr - Y*sr, y = X*sr + Y*cr;
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  }
+  ctx.strokeStyle = 'rgba(224,129,60,0.55)'; ctx.lineWidth = 2;
+  ctx.stroke();
+  // 中心质量
+  const g = ctx.createRadialGradient(0,0,0,0,0,120);
+  g.addColorStop(0,'rgba(255,240,220,0.98)');
+  g.addColorStop(.3,'rgba(224,129,60,0.5)');
+  g.addColorStop(1,'rgba(224,129,60,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0,0,120,0,7); ctx.fill();
+
+  // 行星
+  if (p > 0.02){
+    const th = p*Math.PI*2;
+    const X = Math.cos(th)*a, Y = Math.sin(th)*b;
+    const x = X*cr - Y*sr, y = X*sr + Y*cr;
+    ctx.fillStyle = '#FFF6E8';
+    ctx.beginPath(); ctx.arc(x,y,9,0,7); ctx.fill();
+  }
+
+  // 沿线奔跑的高光：保证每一帧这条线上都有东西在动
+  const head = (t * 0.55) % 1;
+  for (let k = 0; k < 46; k++){
+    const u = (head - k*0.006 + 1) % 1;
+    const th2 = u*Math.PI*2;
+    const X2 = Math.cos(th2)*a, Y2 = Math.sin(th2)*b;
+    const x2 = X2*cr - Y2*sr, y2 = X2*sr + Y2*cr;
+    ctx.fillStyle = 'rgba(255,214,170,' + ((1-k/46)*0.5).toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(x2, y2, 2.8 - k*0.045, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPrecess(ctx, t){
+  const cx = CX, cy = CY + 20;
+  const a = 330, e = 0.62, b = a*Math.sqrt(1-e*e);
+  const p = clamp01(t / 7.5);          // 整镜持续绘制，不提前结束
+  const total = Math.PI*2*2.3;
+  const prec = 0.19;
+  const th = total * p;
+
+  ctx.save(); ctx.translate(cx, cy);
+  ctx.beginPath();
+  const S = 420, steps = Math.max(1, Math.floor(S*p));
+  for (let i = 0; i <= steps; i++){
+    const u = th * (i / steps);          // 线头与质点必须用同一个参数
+    const rot = u * prec;
+    const X = Math.cos(u)*a, Y = Math.sin(u)*b;
+    const x = X*Math.cos(rot) - Y*Math.sin(rot);
+    const y = X*Math.sin(rot) + Y*Math.cos(rot);
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  }
+  ctx.strokeStyle = 'rgba(224,129,60,0.5)';
+  ctx.lineWidth = 1.8;
+  ctx.stroke();
+
+  // 线头的质点：整镜都在动
+  const rot2 = th * prec;
+  const X2 = Math.cos(th)*a, Y2 = Math.sin(th)*b;
+  const hx = X2*Math.cos(rot2) - Y2*Math.sin(rot2);
+  const hy = X2*Math.sin(rot2) + Y2*Math.cos(rot2);
+  ctx.fillStyle = '#FFF6E8';
+  ctx.beginPath(); ctx.arc(hx, hy, 7, 0, 7); ctx.fill();
+
+  const g = ctx.createRadialGradient(0,0,0,0,0,90);
+  g.addColorStop(0,'rgba(255,245,230,1)');
+  g.addColorStop(.35,'rgba(224,129,60,.45)');
+  g.addColorStop(1,'rgba(224,129,60,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0,0,90,0,7); ctx.fill();
+
+  ctx.restore();
+}
+
+/* --------------------------------------------------------------- 电梯 */
+function drawElevator(ctx, t){
+  const w = 300, h = 400, x0 = CX - w/2, y0 = CY - h/2 - 20;
+  const p = easeInOut(seg(t, 0.15, 1.4));
+
+  ctx.save();
+  ctx.strokeStyle = `rgba(230,220,203,${0.85*p})`;
+  ctx.lineWidth = 2.4;
+  ctx.strokeRect(x0, y0, w, h);
+
+  // 内部网格被"拉"下去
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x0, y0, w, h); ctx.clip();
+  const lift = 26 * Math.sin(t*1.1) * p;
+  ctx.strokeStyle = `rgba(224,129,60,${0.30*p})`; ctx.lineWidth = 1.2;
+  for (let i = 1; i < 7; i++){
+    const y = y0 + (h/7)*i + lift;
+    ctx.beginPath(); ctx.moveTo(x0+8, y); ctx.lineTo(x0+w-8, y); ctx.stroke();
+  }
+  // 箱内飘落的微尘
+  for (let i = 0; i < 16; i++){
+    const sp = 26 + (i*13)%22;
+    const yy = y0 + ((t*sp + i*61) % h);
+    const xx = x0 + 18 + ((i*97 + (i*37)%40) % (w-36));
+    ctx.fillStyle = 'rgba(230,220,203,' + (0.10 + 0.14*Math.abs(Math.sin(t*1.3+i))).toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(xx, yy, 1.6, 0, 7); ctx.fill();
+  }
+
+  // 悬浮的点
+  const dy = Math.sin(t*1.7)*10;
+  ctx.fillStyle = '#FFF3E2';
+  ctx.beginPath(); ctx.arc(CX, CY + dy, 10, 0, 7); ctx.fill();
+  ctx.restore();
+  ctx.restore();
+}
+
+/* --------------------------------------------------------------- 透镜环 */
+function drawLensing(ctx, t){
+  const cx = CX, cy = CY - 10;
+  const p = easeOut(seg(t, 0.1, 1.6));
+  for (let i = 0; i < 3; i++){
+    const R = (150 + i*105) * p;
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7);
+    ctx.strokeStyle = `rgba(224,129,60,${0.45 - i*0.10})`;
+    ctx.lineWidth = 2 - i*0.3;
+    ctx.stroke();  }
+  const g = ctx.createRadialGradient(cx,cy,0,cx,cy,120);
+  g.addColorStop(0,'rgba(255,246,232,.98)'); g.addColorStop(.4,'rgba(224,129,60,.35)');
+  g.addColorStop(1,'rgba(224,129,60,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx,cy,120,0,7); ctx.fill();
+
+  // 背面星系被拉成弧
+  ctx.save(); ctx.translate(cx, cy);
+  for (let i = 0; i < 14; i++){
+    const ang = (i/14)*Math.PI*2 + t*0.15;
+    const R = 210*p;
+    if (R < 20) continue;
+    ctx.beginPath();
+    ctx.arc(0, 0, R, ang, ang + 0.12 + 0.05*Math.sin(i));
+    ctx.strokeStyle = 'rgba(140,175,225,.45)'; ctx.lineWidth = 2.4; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* --------------------------------------------------------------- 波形 */
+function drawWave(ctx, t, x0, y0, w, h){
+  const p = easeInOut(seg(t, 0.3, 1.9));
+  const n = Math.floor(520 * p);
+  if (n < 2) return;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++){
+    const u = i/520;
+    const f = 2.0 + 26*u*u;             // 频率上扬
+    const amp = 0.10 + 0.9*u*u;
+    const y = Math.sin(u*f*Math.PI*2*1.7) * amp * (h/2);
+    const x = x0 + u*w;
+    i ? ctx.lineTo(x, y0 - y) : ctx.moveTo(x, y0 - y);
+  }
+  ctx.strokeStyle = 'rgba(91,143,214,.9)'; ctx.lineWidth = 2.2;
+  ctx.stroke();}
+
+/* --------------------------------------------------------------- 黑洞 */
+function drawBlackHole(ctx, t){
+  const cx = CX, cy = CY;
+  const p = easeOut(seg(t, 0.1, 1.8));
+  const R = 168 * p;
+
+  ctx.save();
+  // 吸积盘（椭圆环）
+  ctx.translate(cx, cy);
+  ctx.rotate(-0.16);
+  for (let k = 0; k < 3; k++){
+    const rr = R * (1.55 + k*0.16);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rr, rr*0.30, 0, 0, 7);
+    ctx.strokeStyle = `rgba(224,129,60,${0.16 - k*0.04})`;
+    ctx.lineWidth = 10 - k*3;
+    ctx.stroke();  }
+  ctx.restore();
+
+  // 外围辉光（画在阴影之下）
+  const g = ctx.createRadialGradient(cx, cy, R*0.9, cx, cy, R*2.1);
+  g.addColorStop(0,'rgba(224,129,60,.22)'); g.addColorStop(1,'rgba(224,129,60,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R*2.1, 0, 7); ctx.fill();
+  // 环绕火花：吸积盘一直在转
+  for (let i = 0; i < 30; i++){
+    const ang = t * (0.75 + 0.11*i) + i * 2.399;
+    const rr = R * (1.45 + 0.22*((i*7)%5)/5);
+    const px = cx + Math.cos(ang) * rr;
+    const py = cy + Math.sin(ang) * rr * 0.30;
+    const aa = 0.22 + 0.42*Math.abs(Math.sin(t*1.7 + i));
+    ctx.fillStyle = 'rgba(255,205,158,' + aa.toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(px, py, 2.2, 0, 7); ctx.fill();
+  }
+
+
+  // 阴影：纯黑
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill();
+
+  // 光子环（压在阴影边缘）
+  ctx.beginPath(); ctx.arc(cx, cy, R*1.04, 0, 7);
+  ctx.strokeStyle = 'rgba(255,222,182,.92)'; ctx.lineWidth = 3;
+  ctx.stroke();}
+
+/* ------------------------------------------------------- 粒子迸发（转场） */
+const BURST = (() => {
+  const r = rng(77123), a = [];
+  for (let i = 0; i < 120; i++){
+    const th = r()*Math.PI*2, sp = 0.25 + r()*1.0;
+    a.push({ th, sp, s: .8 + r()*2.6, life: .55 + r()*.55, hue: r() });
+  }
+  return a;
+})();
+
+function drawBurst(ctx, lt, cx = CX, cy = CY){
+  if (lt > 1.15) return;
+  const p = lt / 1.15;
+  const e = 1 - Math.pow(1-p, 3);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const b of BURST){
+    if (p > b.life) continue;
+    const d = 60 + e * 900 * b.sp;
+    const x = cx + Math.cos(b.th) * d;
+    const y = cy + Math.sin(b.th) * d * 0.62;
+    const a = (1 - p/b.life) * 0.85;
+    ctx.fillStyle = b.hue > .72 ? `rgba(150,185,235,${a})` : `rgba(255,190,130,${a})`;
+    ctx.beginPath(); ctx.arc(x, y, b.s * (1 - p*0.6), 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+
+
+
+/* ==================================================================
+   真 3D：粒子场 + 吸积盘
+   用的是同一套 proj() 透视投影，只是把点放进三维空间并做深度排序。
+   ================================================================== */
+
+function makeField3D(seed, n, box){
+  const r = rng(seed), a = [];
+  for (let i = 0; i < n; i++){
+    a.push({
+      x:(r()-.5)*box.x, y:(r()-.5)*box.y, z:(r()*2-1)*box.z,
+      s:0.5 + r()*1.8, a:0.10 + r()*0.55,
+      ph:r()*7, tw:0.25 + r()*1.1
+    });
+  }
+  return a;
+}
+
+// 景深：离焦点越远越虚（只降低对比，尺寸克制放大）
+function drawField3D(ctx, cam, field, t, focus){
+  const pts = [];
+  for (let i = 0; i < field.length; i++){
+    const p = field[i];
+    const pr = proj(cam, p.x, p.y, p.z);
+    if (!pr) continue;
+    const sx = pr[0], sy = pr[1], d = pr[2];
+    if (sx < -60 || sx > W+60 || sy < -60 || sy > H+60) continue;
+    pts.push([sx, sy, d, p]);
+  }
+  pts.sort((u, v) => v[2] - u[2]);
+
+  for (let i = 0; i < pts.length; i++){
+    const sx = pts[i][0], sy = pts[i][1], d = pts[i][2], p = pts[i][3];
+    const defocus = Math.min(1.6, Math.abs(d - (focus || 9.5)) * 0.13);
+    let rad = p.s * (6.0 / d) * (1 + defocus * 0.8);
+    rad = Math.max(0.28, Math.min(2.6, rad));
+    let al = p.a * (4.2 / d) * Math.max(0.25, 1 - defocus * 0.45);
+    al *= 0.55 + 0.45 * Math.sin(t * p.tw + p.ph);
+    if (al < 0.012) continue;
+    ctx.fillStyle = 'rgba(186,204,232,' + al.toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fill();
+  }
+}
+
+// 吸积盘：开普勒差速旋转的真三维粒子盘
+function makeDisk(seed, n){
+  const r = rng(seed), a = [];
+  for (let i = 0; i < n; i++){
+    const rr = 1.55 + Math.pow(r(), 1.7) * 2.6;      // 内密外疏
+    a.push({
+      r: rr, th: r() * Math.PI * 2, z: (r()-.5) * 0.10 * rr,
+      s: 0.6 + r()*1.9, a: 0.25 + r()*0.75, hue: r()
+    });
+  }
+  return a;
+}
+
+function drawDisk3D(ctx, cam, disk, t, opt){
+  const o = opt || {};
+  const pts = [];
+  for (let i = 0; i < disk.length; i++){
+    const p = disk[i];
+    const omega = 0.55 / Math.pow(p.r, 1.5);           // 差速旋转
+    const th = p.th + t * omega;
+    const x = Math.cos(th) * p.r;
+    const z = Math.sin(th) * p.r;
+    const pr = proj(cam, x, p.z, z);
+    if (!pr) continue;
+    if (pr[0] < -60 || pr[0] > W+60 || pr[1] < -60 || pr[1] > H+60) continue;
+    pts.push([pr[0], pr[1], pr[2], p, th]);
+  }
+  pts.sort((u, v) => v[2] - u[2]);
+  for (let i = 0; i < pts.length; i++){
+    const sx = pts[i][0], sy = pts[i][1], d = pts[i][2], p = pts[i][3], th = pts[i][4];
+    // 多普勒：朝向观察者的一侧更亮
+    const dop = 0.55 + 0.45 * Math.cos(th);
+    const al = Math.min(0.9, p.a * (4.6 / d) * dop);
+    let rad = p.s * (8.0 / d) * (0.8 + 0.5 * dop);
+    rad = Math.max(0.45, Math.min(2.8, rad));
+    if (al < 0.02) continue;
+    const warm = p.hue > 0.75;
+    ctx.fillStyle = warm
+      ? 'rgba(255,232,200,' + al.toFixed(3) + ')'
+      : 'rgba(240,150,80,' + (al*0.9).toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fill();
+  }
+}
+
+const FIELD_STARS = makeField3D(3181, 760, { x: 16, y: 9.5, z: 14 });
+const DISK = makeDisk(9091, 1100);
+
+
+
+/* ---------------- 电梯 3D：线框舱 + 下落粒子场 ---------------- */
+const ELEV = (() => {
+  const r = rng(5150), a = [];
+  for (let i = 0; i < 260; i++){
+    a.push({ x:(r()-.5)*2.2, y:(r()-.5)*3.0, z:(r()-.5)*2.2,
+             v:0.35 + r()*0.65, s:0.7 + r()*1.8, a:0.25 + r()*0.55 });
+  }
+  return a;
+})();
+
+function drawElevator3D(ctx, t){
+  const cam = makeCam({ yaw: 0.42 + t*0.05, pitch: -0.18, dist: 8.4, f: 1050 });
+  const hw = 1.15, hh = 1.55, hd = 1.15;
+
+  // 线框舱
+  const C = [
+    [-hw,-hh,-hd],[ hw,-hh,-hd],[ hw, hh,-hd],[-hw, hh,-hd],
+    [-hw,-hh, hd],[ hw,-hh, hd],[ hw, hh, hd],[-hw, hh, hd]
+  ].map(v => proj(cam, v[0], v[1], v[2]));
+  const E = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  ctx.strokeStyle = 'rgba(230,220,203,0.72)';
+  ctx.lineWidth = 1.6;
+  for (const [i,j] of E){
+    if (!C[i] || !C[j]) continue;
+    ctx.beginPath(); ctx.moveTo(C[i][0], C[i][1]); ctx.lineTo(C[j][0], C[j][1]); ctx.stroke();
+  }
+
+  // 地板网格
+  ctx.strokeStyle = 'rgba(150,168,196,0.16)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 6; i++){
+    const u = -hw + (2*hw)*i/6;
+    let a1 = proj(cam, u, -hh, -hd), b1 = proj(cam, u, -hh, hd);
+    let a2 = proj(cam, -hw, -hh, u), b2 = proj(cam, hw, -hh, u);
+    if (a1 && b1){ ctx.beginPath(); ctx.moveTo(a1[0],a1[1]); ctx.lineTo(b1[0],b1[1]); ctx.stroke(); }
+    if (a2 && b2){ ctx.beginPath(); ctx.moveTo(a2[0],a2[1]); ctx.lineTo(b2[0],b2[1]); ctx.stroke(); }
+  }
+
+  // 下落粒子（自由落体感：y 随时间下移并循环）
+  const pts = [];
+  for (const p of ELEV){
+    let y = ((p.y - t * p.v + 1.55) % 3.1 + 3.1) % 3.1 - 1.55;
+    const pr = proj(cam, p.x, y, p.z);
+    if (!pr) continue;
+    pts.push([pr[0], pr[1], pr[2], p]);
+  }
+  pts.sort((u,v) => v[2]-u[2]);
+  for (const [sx,sy,d,p] of pts){
+    const rad = Math.max(0.4, Math.min(2.4, p.s * (6.5/d)));
+    const al = Math.min(0.8, p.a * (4.0/d));
+    ctx.fillStyle = 'rgba(232,222,206,' + al.toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fill();
+  }
+
+  // 舱内观察者：悬浮的白点
+  const c = proj(cam, 0, Math.sin(t*1.3)*0.06, 0);
+  if (c){
+    const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], 46);
+    g.addColorStop(0, 'rgba(255,248,236,0.95)');
+    g.addColorStop(0.35,'rgba(224,129,60,0.35)');
+    g.addColorStop(1, 'rgba(224,129,60,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(c[0], c[1], 46, 0, 7); ctx.fill();
+    ctx.fillStyle = '#FFF6E8';
+    ctx.beginPath(); ctx.arc(c[0], c[1], 6.5, 0, 7); ctx.fill();
+  }
+}
+
+
+/* ---------------- L1 通用几何元件 ---------------- */
+function ringTicks(ctx, cx, cy, r, n, len, alpha, rot){
+  ctx.strokeStyle = `rgba(160,175,200,${alpha})`;
+  ctx.lineWidth = 1;
+  for (let i = 0; i < n; i++){
+    const a = (rot||0) + i*Math.PI*2/n;
+    const L = (i % 5 === 0) ? len*1.9 : len;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a)*r, cy + Math.sin(a)*r);
+    ctx.lineTo(cx + Math.cos(a)*(r+L), cy + Math.sin(a)*(r+L));
+    ctx.stroke();
+  }
+}
+
+function polarGrid(ctx, cx, cy, rings, spokes, rMax, alpha){
+  ctx.strokeStyle = `rgba(150,168,196,${alpha})`;
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= rings; i++){
+    ctx.beginPath(); ctx.arc(cx, cy, rMax*i/rings, 0, 7); ctx.stroke();
+  }
+  for (let i = 0; i < spokes; i++){
+    const a = i*Math.PI*2/spokes;
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a)*rMax, cy + Math.sin(a)*rMax); ctx.stroke();
+  }
+}
+
+function axisTicks(ctx, x0, x1, y, n, alpha, labels){
+  ctx.strokeStyle = `rgba(160,175,200,${alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+  const w = x1 - x0;
+  ctx.font = '12px Consolas'; ctx.textAlign = 'center';
+  for (let i = 0; i <= n; i++){
+    const x = x0 + w*i/n;
+    const big = (i % 5 === 0);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + (big ? 11 : 5)); ctx.stroke();
+    if (big && labels){
+      ctx.fillStyle = `rgba(160,175,200,${alpha*1.7})`;
+      ctx.fillText(labels(i), x, y + 26);
+    }
+  }
+}
+
+function crosshair(ctx, alpha){
+  ctx.strokeStyle = `rgba(160,175,200,${alpha})`;
+  ctx.lineWidth = 1;
+  const L = 34;
+  ctx.beginPath();
+  ctx.moveTo(CX-L, CY); ctx.lineTo(CX+L, CY);
+  ctx.moveTo(CX, CY-L); ctx.lineTo(CX, CY+L);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(CX, CY, 9, 0, 7); ctx.stroke();
+}
+
+/* ---------------- 镜头模板：warp（参数化，便于移植成 skill） ---------------- */
+const WARP_SHOT = {
+  id: 'warp',
+  camera: { yaw0: -0.35, yawRate: 0.045, pitch: -0.60, dist: 8.2, f: 1050 },
+  plane:  { n: 38, ext: 7.6, k0: 1.38, kGrow: 0.30 },
+  structure: { subGrid: true, subN: 20, subAlpha: 0.055, instrument: true },
+  labels: [
+    { key:'M',  cn:'中心质量', en:'MASS  M',   off:[-150, -120] },
+    { key:'r',  cn:'测地线半径', en:'RADIUS  r', off:[ 190,  120] },
+    { key:'k',  cn:'曲率',     en:'CURVATURE', off:[ 210, -190] }
+  ]
+};
+
+/* ================================================================ 剧本 */
+
+const SCRIPT = [
+  {
+    id:'open', dur:6.0, kind:'title',
+    cn:'引力', en:'GRAVITY', sub:''
+  },
+  {
+    id:'newton', dur:16.0, kind:'orbit',
+    chapter:['I','苹果与月亮','THE APPLE AND THE MOON'],
+    formula:'F = G · mM / r²', formulaPos:[1180, 250],
+    subs:[
+      [0.6, '1687 年，牛顿用一个公式，把苹果和月亮绑在了一起。'],
+      [7.4, '引力与质量成正比，与距离的平方成反比。'],
+      [12.4,'但他没有解释：这个“超距作用”，究竟是什么。']
+    ]
+  },
+  {
+    id:'mercury', dur:15.0, kind:'precess',
+    chapter:['II','两个异常','TWO ANOMALIES'],
+    subs:[
+      [0.6, '第一件事：水星每世纪多转了 43 角秒。'],
+      [6.0, '第二件事：1919 年的日食证明，星光会被太阳压弯。'],
+      [11.0,'这两个数字，牛顿的理论一个都算不出来。']
+    ]
+  },
+  {
+    id:'elevator', dur:15.0, kind:'elevator',
+    chapter:['III','电梯','THE ELEVATOR'],
+    subs:[
+      [0.6, '爱因斯坦设想了一部自由下落的电梯。'],
+      [6.2, '里面的人感觉不到引力——他看到的，是失重。'],
+      [11.2,'加速与引力，在局部无法区分。所以引力也许根本不是“力”。']
+    ]
+  },
+  {
+    id:'warp', dur:20.0, kind:'warp',
+    chapter:['IV','弯曲','CURVATURE'],
+    subs:[
+      [0.6, '质量告诉时空如何弯曲。'],
+      [7.0, '时空告诉物质如何运动。'],
+      [13.0,'行星不是被“拉”着走，它只是在弯曲的时空里，走一条最直的路。']
+    ]
+  },
+  {
+    id:'evidence', dur:20.0, kind:'evidence',
+    chapter:['V','证据','THE EVIDENCE'],
+    subs:[
+      [0.6, '引力透镜：光绕过星系，像穿过一块透镜。'],
+      [7.0, '卫星上的时钟每天要做 38 微秒的修正。'],
+      [13.0,'2015 年，我们第一次“听见”两个黑洞的合并。']
+    ]
+  },
+  {
+    id:'horizon', dur:14.0, kind:'blackhole',
+    chapter:['VI','视界','THE HORIZON'],
+    subs:[
+      [0.6, '当弯曲足够深，连光也逃不出来。'],
+      [6.4, '2019 年，人类拍下了它的影子。'],
+      [10.4,'在视界之内，时间与空间交换了角色。']
+    ]
+  },
+  {
+    id:'end', dur:11.0, kind:'outro',
+    cn:'时空告诉物质如何运动，\n物质告诉时空如何弯曲。',
+    en:'SPACETIME TELLS MATTER HOW TO MOVE',
+    sub:''
+  }
+];
+
+/* ------------------------------------------------------------ 时间轴 */
+let ACC = 0;
+for (const s of SCRIPT){ s.start = ACC; ACC += s.dur; }
+const TOTAL = ACC;
+
+function sceneAt(t){
+  for (const s of SCRIPT) if (t < s.start + s.dur - 1e-9) return s;
+  return SCRIPT[SCRIPT.length - 1];
+}
+
+/* ------------------------------------------------------------ DOM 层 */
+const TEXT = document.getElementById('text');
+const SUB  = document.getElementById('sub');
+const CH   = document.getElementById('chapter');
+let mountedId = null;
+
+const mk = (cls, html) => { const d = document.createElement('div'); d.className = cls; if (html!=null) d.innerHTML = html; return d; };
+
+function mount(sc){
+  TEXT.innerHTML = ''; SUB.innerHTML = '';
+  if (sc.kind === 'title'){
+    sc._cn = mk('big-cn', sc.cn); sc._cn.style.top = '410px'; sc._cn.style.fontSize = '150px';
+    TEXT.appendChild(sc._cn);
+    sc._en = mk('big-en', sc.en); sc._en.style.top = '640px'; sc._en.style.fontSize = '24px';
+    TEXT.appendChild(sc._en);
+  } else if (sc.kind === 'outro'){
+    sc._cn = mk('big-cn', sc.cn.replace('\n','<br>')); sc._cn.style.top = '400px'; sc._cn.style.fontSize = '64px';
+    TEXT.appendChild(sc._cn);
+    sc._en = mk('big-en', sc.en); sc._en.style.top = '700px'; sc._en.style.fontSize = '17px';
+    TEXT.appendChild(sc._en);
+  }
+  if (sc.formula){
+    sc._f = mk('formula', sc.formula);
+    sc._f.style.left = sc.formulaPos[0] + 'px'; sc._f.style.top = sc.formulaPos[1] + 'px';
+    TEXT.appendChild(sc._f);
+  }
+  // 字幕容器
+  sc._sub = mk('line', ''); SUB.appendChild(sc._sub);
+
+  // 章节小标
+  if (sc.chapter){
+    CH.querySelector('.num').textContent = sc.chapter[0];
+    CH.querySelector('.cn').textContent  = sc.chapter[1];
+    CH.querySelector('.en').textContent  = sc.chapter[2];
+  } else {
+    CH.querySelector('.num').textContent = '';
+    CH.querySelector('.cn').textContent = '';
+    CH.querySelector('.en').textContent = '';
+  }
+  mountedId = sc.id;
+}
+
+function enterEl(el, lt, start, dur, dist, blur){
+  const p = easeExpo(seg(lt, start, dur));
+  el.style.opacity = p;
+  el.style.transform = `translateY(${(1-p)*(dist||28)}px)`;
+  el.style.filter = p > .995 ? 'none' : `blur(${(1-p)*(blur||9)}px)`;
+}
+
+
+/* --------------------------------------------------- 廉价 bloom（替代 shadowBlur） */
+const _bloom = document.createElement('canvas');
+_bloom.width = Math.floor(W/6); _bloom.height = Math.floor(H/6);
+const _bctx = _bloom.getContext('2d');
+
+function bloom(ctx){
+  // 注意：参数是 2D context，不是 canvas
+  const src = ctx.canvas;
+  _bctx.clearRect(0,0,_bloom.width,_bloom.height);
+  _bctx.drawImage(src, 0,0,_bloom.width,_bloom.height);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.5;
+  ctx.drawImage(_bloom, 0,0,_bloom.width,_bloom.height, 0,0,W,H);
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------ 画布 */
+const cvBg = document.getElementById('cvBg'), ctxBg = cvBg.getContext('2d');
+const cvMid = document.getElementById('cvMid'), ctxMid = cvMid.getContext('2d');
+const cvFx = document.getElementById('cvFx'), ctxFx = cvFx.getContext('2d');
+
+function clearAll(){ ctxBg.clearRect(0,0,W,H); ctxMid.clearRect(0,0,W,H); ctxFx.clearRect(0,0,W,H); }
+
+function drawBackground(t){
+  drawStars(ctxBg, t, makeCam({}));
+}
+
+function drawScene(sc, lt, t){
+  ctxMid.clearRect(0,0,W,H);
+  switch (sc.kind){
+    case 'orbit': {
+      // L1：极坐标网格
+      const a0 = easeOut(seg(lt, 0.2, 1.4));
+      polarGrid(ctxMid, CX, CY, 6, 24, 430, 0.045*a0 + 0.012);
+      // L2：主体
+      drawOrbit(ctxMid, lt, {});
+      // L1b/L3
+      drawInstrument(ctxMid, lt, { rows: [
+        ['r', (3.84 + 0.42*Math.sin(lt*0.5)).toFixed(2)],
+        ['v', (1.02 + 0.03*Math.cos(lt*0.6)).toFixed(3)],
+        ['F', (0.264 + 0.012*Math.sin(lt*0.9)).toFixed(3)]
+      ]});
+      const ar = easeOut(seg(lt, 1.6, 0.7));
+      drawLeader(ctxMid, CX, CY, 560, 330, '中心质量', 'MASS  M', ar);
+      const op = proj(makeCam({}), 0, 0, 0);
+      const pr = [CX + 340*Math.cos(-0.42), CY + 210*Math.sin(-0.42)];
+      drawLeader(ctxMid, pr[0], pr[1], 1290, 700, '轨道半径', 'RADIUS  r', easeOut(seg(lt, 3.2, 0.7)));
+      break;
+    }
+    case 'precess': {
+      // L1：角度刻度盘
+      const a0 = easeOut(seg(lt, 0.2, 1.4));
+      ringTicks(ctxMid, CX, CY + 20, 392, 60, 10, 0.10*a0 + 0.02, -Math.PI/2);
+      // L2
+      drawPrecess(ctxMid, lt);
+      drawInstrument(ctxMid, lt, { rows: [
+        ['Δφ', (43.0 + 0.6*Math.sin(lt*0.7)).toFixed(1) + '″'],
+        ['T',  (87.97).toFixed(2) + 'd'],
+        ['e',  (0.2056).toFixed(4)]
+      ]});
+      drawLeader(ctxMid, CX + 262, CY - 176, 1420, 260, '每世纪进动', 'PRECESSION  43″', easeOut(seg(lt, 2.4, 0.8)));
+      break;
+    }
+    case 'elevator': {
+      // 真 3D：线框舱 + 自由下落粒子
+      drawElevator3D(ctxMid, lt);
+      drawInstrument(ctxMid, lt, { rows: [
+        ['g', (9.81).toFixed(2)],
+        ['a', (9.79 + 0.04*Math.sin(lt*1.1)).toFixed(2)],
+        ['h', (1.00 - 0.08*Math.sin(lt*0.5)).toFixed(2)]
+      ], ruler: false});
+      drawLeader(ctxMid, CX + 210, CY + 150, 1330, 620, '自由下落参考系', 'FREELY  FALLING', easeOut(seg(lt, 1.6, 0.8)));
+      break;
+    }
+    case 'warp': {
+      const T = WARP_SHOT;
+      const cam = makeCam({
+        yaw: T.camera.yaw0 + lt*T.camera.yawRate,
+        pitch: T.camera.pitch - 0.02*Math.sin(lt*0.4),
+        dist: T.camera.dist, f: T.camera.f
+      });
+      // L1 结构层：副网格
+      if (T.structure.subGrid) drawSubGrid(ctxMid, cam, T.plane.ext, T.structure.subN, T.structure.subAlpha);
+      // L2 主体
+      const core = drawWarpGrid(ctxMid, lt, cam, {
+        n: T.plane.n, ext: T.plane.ext,
+        k: T.plane.k0 + T.plane.kGrow*easeInOut(seg(lt, 0, 6)), glow: false
+      });
+      // L1b + L3b：仪器元素
+      if (T.structure.instrument) drawInstrument(ctxMid, lt, {});
+
+      // L3 引线标注
+      const a1 = easeOut(seg(lt, 1.2, 0.7));
+      const a2 = easeOut(seg(lt, 3.0, 0.7));
+      const a3 = easeOut(seg(lt, 5.0, 0.7));
+      if (core){
+        drawLeader(ctxMid, core[0], core[1],
+                   core[0] + T.labels[0].off[0], core[1] + T.labels[0].off[1],
+                   T.labels[0].cn, T.labels[0].en, a1);
+        const pr = proj(cam, 2.6, gridHeight(2.6, 0, T.plane.k0), 0);
+        if (pr) drawLeader(ctxMid, pr[0], pr[1],
+                   pr[0] + T.labels[1].off[0], pr[1] + T.labels[1].off[1],
+                   T.labels[1].cn, T.labels[1].en, a2);
+        const pk = proj(cam, -3.2, gridHeight(-3.2, 2.4, T.plane.k0), 2.4);
+        if (pk) drawLeader(ctxMid, pk[0], pk[1],
+                   pk[0] + T.labels[2].off[0], pk[1] + T.labels[2].off[1],
+                   T.labels[2].cn, T.labels[2].en, a3);
+      }
+      break;
+    }
+    case 'evidence': {
+      const a0 = easeOut(seg(lt, 0.2, 1.3));
+      // L1：波形坐标轴
+      axisTicks(ctxMid, 1080, 1700, 792, 16, 0.08*a0 + 0.015, i => (i*0.25).toFixed(2));
+      // L2
+      drawLensing(ctxMid, lt);
+      drawWave(ctxMid, lt, 1120, 742, 580, 190);
+      drawInstrument(ctxMid, lt, { rows: [
+        ['f', (32.4 + 3.1*Math.sin(lt*0.8)).toFixed(1) + 'Hz'],
+        ['h', (1.4e-21).toExponential(2)],
+        ['d', (410).toFixed(0) + 'Mpc']
+      ]});
+      drawLeader(ctxMid, CX - 120, CY + 210, 260, 300, '引力透镜', 'GRAVITATIONAL  LENS', easeOut(seg(lt, 1.6, 0.8)));
+      break;
+    }
+    case 'blackhole': {
+      const a0 = easeOut(seg(lt, 0.2, 1.4));
+      // 真三维吸积盘：差速旋转 + 多普勒增亮 + 深度排序
+      const camD = makeCam({ yaw: -0.35 + lt*0.02, pitch: -0.30, dist: 7.4, f: 1000 });
+      drawDisk3D(ctxMid, camD, DISK, lt, {});
+      // L1：环形刻度（把视界当量角器）
+      ringTicks(ctxMid, CX, CY, 210, 72, 7, 0.10*a0 + 0.02, 0);
+      ringTicks(ctxMid, CX, CY, 232, 24, 13, 0.10*a0 + 0.015, 0.13);
+      // L2
+      drawBlackHole(ctxMid, lt);
+      drawInstrument(ctxMid, lt, { rows: [
+        ['M',  '6.5e9 M☉'],
+        ['Rs', (1.9e10).toExponential(1) + 'm'],
+        ['T',  (6.2 + 0.1*Math.sin(lt*0.6)).toFixed(1) + 'G']
+      ]});
+      drawLeader(ctxMid, CX + 150, CY - 130, 1330, 300, '光子环', 'PHOTON  RING', easeOut(seg(lt, 1.8, 0.8)));
+      drawLeader(ctxMid, CX - 20, CY + 190, 520, 780, '事件视界', 'EVENT  HORIZON', easeOut(seg(lt, 4.0, 0.8)));
+      break;
+    }
+    default: break;
+  }
+  if (sc.kind !== 'elevator') bloom(ctxMid);
+}
+
+function drawFx(sc, lt){
+  ctxFx.clearRect(0,0,W,H);
+  if (lt < 1.2) drawBurst(ctxFx, lt, CX, sc.kind === 'warp' ? CY + 40 : CY);
+}
+
+
+/* ==================================================================
+   L1 结构层 + L3 标注层（可复用模板）
+   —— 这两层是"仪器感"的来源，也是信息密度的主要贡献者。
+   全部通过参数驱动：见 WARP_SHOT
+   ================================================================== */
+
+// L1a：更细、更淡的副网格，垫在主网格下方
+function drawSubGrid(ctx, cam, ext, n, alpha){
+  const step = (ext*2)/n;
+  ctx.strokeStyle = `rgba(150,168,196,${alpha})`;
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= n; i++){
+    const a = -ext + i*step;
+    ctx.beginPath();
+    let started = false;
+    for (let j = 0; j <= n; j++){
+      const b = -ext + j*step;
+      const p = proj(cam, a, gridHeight(a, b, 0.55) - 0.05, b);
+      if (!p){ started = false; continue; }
+      if (!started){ ctx.moveTo(p[0], p[1]); started = true; }
+      else ctx.lineTo(p[0], p[1]);
+    }
+    ctx.stroke();
+    ctx.beginPath();
+    started = false;
+    for (let j = 0; j <= n; j++){
+      const b = -ext + j*step;
+      const p = proj(cam, b, gridHeight(b, a, 0.55) - 0.05, a);
+      if (!p){ started = false; continue; }
+      if (!started){ ctx.moveTo(p[0], p[1]); started = true; }
+      else ctx.lineTo(p[0], p[1]);
+    }
+    ctx.stroke();
+  }
+}
+
+// L1b + L3：屏幕空间的仪器元素（标尺、角括号、读数框）
+function drawInstrument(ctx, t, opt){
+  const o = Object.assign({ruler:true, brackets:true, readout:true, alpha:1}, opt || {});
+  const A = o.alpha;
+
+  if (o.brackets){
+    const m = 46, L = 54;
+    ctx.strokeStyle = `rgba(160,175,200,${0.22*A})`;
+    ctx.lineWidth = 1.4;
+    const corners = [[m,m,1,1],[W-m,m,-1,1],[m,H-m,1,-1],[W-m,H-m,-1,-1]];
+    for (const [x,y,sx,sy] of corners){
+      ctx.beginPath();
+      ctx.moveTo(x, y + sy*L); ctx.lineTo(x, y); ctx.lineTo(x + sx*L, y);
+      ctx.stroke();
+    }
+  }
+
+  if (o.ruler){
+    const y = H - 62, x0 = 120, w = W - 240, n = 48;
+    const off = (t * 5) % 6;                     // 刻度缓慢滚动
+    ctx.strokeStyle = `rgba(160,175,200,${0.20*A})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + w, y); ctx.stroke();
+    ctx.font = '14px Consolas';
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= n; i++){
+      const x = x0 + w*i/n + off*2;
+      const big = (i % 6 === 0);
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + (big ? 13 : 6)); ctx.stroke();
+      if (big && x < x0 + w){
+        ctx.fillStyle = `rgba(160,175,200,${0.34*A})`;
+        ctx.fillText(String((i*137 + 240) % 1000).padStart(3, '0'), x, y + 30);
+      }
+    }
+  }
+
+  if (o.readout){
+    const bx = W - 300, by = 132;
+    ctx.strokeStyle = `rgba(224,129,60,${0.48*A})`;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, 190, 96);
+    ctx.font = '14px Consolas';
+    ctx.textAlign = 'left';
+    const rows = o.rows || [
+      ['κ', (0.031 + 0.006*Math.sin(t*0.9)).toFixed(4)],
+      ['r', (4.82 + 0.14*Math.cos(t*0.7)).toFixed(2)],
+      ['t', t.toFixed(1)]
+    ];
+    rows.forEach((r, i) => {
+      ctx.fillStyle = `rgba(160,175,200,${0.55*A})`;
+      ctx.fillText(r[0], bx + 14, by + 26 + i*26);
+      ctx.fillStyle = `rgba(238,230,216,${0.95*A})`;
+      ctx.fillText(r[1], bx + 52, by + 26 + i*26);
+    });
+  }
+  ctx.textAlign = 'left';
+}
+
+// L3：引线标注（锚点 → 折线 → 标签）
+function drawLeader(ctx, ax, ay, lx, ly, text, sub, alpha){
+  const A = alpha == null ? 1 : alpha;
+  const midx = lx - 26;
+  ctx.strokeStyle = `rgba(230,220,203,${0.42*A})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(midx, ly - 6);
+  ctx.lineTo(lx, ly - 6);
+  ctx.stroke();
+
+  ctx.fillStyle = `rgba(224,129,60,${0.9*A})`;
+  ctx.beginPath(); ctx.arc(ax, ay, 3.2, 0, 7); ctx.fill();
+
+  ctx.font = '20px "Microsoft YaHei"';
+  ctx.fillStyle = `rgba(230,220,203,${0.88*A})`;
+  ctx.textAlign = 'left';
+  ctx.fillText(text, lx + 8, ly);
+
+  if (sub){
+    ctx.font = '12px Consolas';
+    ctx.fillStyle = `rgba(160,175,200,${0.55*A})`;
+    ctx.fillText(sub, lx + 8, ly + 20);
+  }
+}
+
+/* ---------------------------------------------------------- 颗粒层 */
+const GRAIN = { alpha: 0.030, tiles: [] };
+(function buildGrain(){
+  for (let k = 0; k < 4; k++){
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const cx = c.getContext('2d');
+    const img = cx.createImageData(256, 256);
+    const r = rng(7000 + k);
+    for (let i = 0; i < img.data.length; i += 4){
+      const v = Math.floor(r()*255);
+      img.data[i] = img.data[i+1] = img.data[i+2] = v;
+      img.data[i+3] = 255;
+    }
+    cx.putImageData(img, 0, 0);
+    GRAIN.tiles.push(c);
+  }
+})();
+
+const cvGrain = document.getElementById('cvGrain');
+const ctxGrain = cvGrain.getContext('2d');
+const grainPatterns = [];
+
+function drawGrain(t){
+  const f = Math.floor(t * 30);
+  const tile = GRAIN.tiles[f % 4];
+  let pat = grainPatterns[f % 4];
+  if (!pat){ pat = ctxGrain.createPattern(tile, 'repeat'); grainPatterns[f % 4] = pat; }
+
+  const ox = (f * 71) % 256;
+  const oy = (f * 137) % 256;
+
+  ctxGrain.clearRect(0, 0, W, H);
+  ctxGrain.save();
+  ctxGrain.globalCompositeOperation = 'lighter';
+  ctxGrain.globalAlpha = GRAIN.alpha;
+  ctxGrain.translate(-ox, -oy);
+  ctxGrain.fillStyle = pat;
+  ctxGrain.fillRect(ox, oy, W, H);
+  ctxGrain.restore();
+  ctxGrain.globalAlpha = 1;
+}
+
+/* ------------------------------------------------------------------ 相机推近 */
+const camEl = document.getElementById('camera');
+const PUSH = 0.035;   // 每镜放大 3.5%
+
+/* ------------------------------------------------------------ 主渲染 */
+function render(t){
+  const sc = sceneAt(t);
+  if (sc.id !== mountedId) mount(sc);
+  const lt = t - sc.start;
+
+  drawBackground(t);
+  drawScene(sc, lt, t);
+  drawFx(sc, lt);
+  drawGrain(t);
+
+  // 极慢推近 + 轻微平移：让每一帧都不是静止的
+  const pu = easeInOut(clamp01(lt / Math.max(1, sc.dur)));
+  camEl.style.transform =
+    `scale(${(1 + PUSH*pu).toFixed(5)}) translate(${(-7*pu).toFixed(2)}px, ${(-5*pu).toFixed(2)}px)`;
+
+  // 章节小标
+  if (sc.chapter){
+    const p = easeOut(seg(lt, 0.2, 0.9));
+    CH.style.opacity = p * 0.95;
+    CH.style.transform = `translateX(${(1-p)*18}px)`;
+  } else {
+    CH.style.opacity = 0;
+  }
+
+  // 标题 / 落版
+  if (sc.kind === 'title'){
+    enterEl(sc._cn, lt, 0.25, 1.1, 36, 14);
+    enterEl(sc._en, lt, 0.85, 1.0, 20, 8);
+  } else if (sc.kind === 'outro'){
+    enterEl(sc._cn, lt, 0.3, 1.3, 26, 12);
+    enterEl(sc._en, lt, 1.1, 1.0, 16, 6);
+    sc._cn.style.opacity *= clamp01(1 - seg(lt, 9.2, 1.2));
+  }
+
+  // 公式
+  if (sc._f) enterEl(sc._f, lt, 2.2, 0.9, 22, 8);
+
+  // 字幕：按时间段切换，逐字打出
+  const lines = sc.subs || (sc.sub ? [[0, sc.sub]] : []);
+  let cur = null;
+  for (const [st, txt] of lines) if (lt >= st) cur = [st, txt];
+  if (cur){
+    const [st, txt] = cur;
+    const n = Math.floor((lt - st) * 9.5);
+    sc._sub.textContent = txt.slice(0, Math.max(0, n));
+    sc._sub.style.opacity = clamp01(seg(lt, st, 0.25)) * (1 - clamp01(seg(lt, st + 5.6, 0.5)) * 0.55);
+  } else {
+    sc._sub.textContent = '';
+  }
+}
+
+/* ------------------------------------------------------------ 播放器 */
+const S = { t:0, playing:true, last:0 };
+
+function frame(now){
+  if (!S.last) S.last = now;
+  const dt = Math.min(0.1, (now - S.last)/1000);
+  S.last = now;
+  if (S.playing){ S.t += dt; if (S.t >= TOTAL) S.t = 0; }
+  render(S.t);
+  document.getElementById('scrub').value = (S.t/TOTAL)*1000;
+  document.getElementById('val').textContent = S.t.toFixed(2) + 's';
+  requestAnimationFrame(frame);
+}
+
+function fit(){
+  const vp = document.getElementById('viewport');
+  if (document.body.classList.contains('export')){ document.getElementById('stage').style.transform='scale(1)'; return; }
+  const s = Math.min((vp.clientWidth-40)/W, (vp.clientHeight-40)/H);
+  document.getElementById('stage').style.transform = `scale(${s})`;
+}
+addEventListener('resize', fit);
+
+document.getElementById('play').onclick = e => {
+  S.playing = !S.playing; e.target.textContent = S.playing ? '暂停' : '播放';
+};
+document.getElementById('prev').onclick = () => { S.playing=false; document.getElementById('play').textContent='播放'; S.t=Math.max(0,S.t-1/30); };
+document.getElementById('next').onclick = () => { S.playing=false; document.getElementById('play').textContent='播放'; S.t=Math.min(TOTAL,S.t+1/30); };
+document.getElementById('scrub').oninput = e => { S.playing=false; document.getElementById('play').textContent='播放'; S.t=(e.target.value/1000)*TOTAL; };
+addEventListener('keydown', e => {
+  if (e.code === 'Space'){ e.preventDefault(); document.getElementById('play').click(); }
+  if (e.code === 'ArrowRight') document.getElementById('next').click();
+  if (e.code === 'ArrowLeft') document.getElementById('prev').click();
+});
+
+/* ------------------------------------------------------------ 启动 */
+(function boot(){
+  const q = new URLSearchParams(location.search);
+  if (q.has('t')){ S.t = parseFloat(q.get('t')) || 0; S.playing = false;
+    document.getElementById('play').textContent = '播放'; }
+  if (q.get('export') === '1') document.body.classList.add('export');
+  // 曝光测试用：?b=2.2
+  if (q.has('b')){
+    const bb = parseFloat(q.get('b')) || 1;
+    document.getElementById('camera').style.filter = `brightness(${bb})`;
+  }
+})();
+
+fit();
+render(S.t);
+requestAnimationFrame(frame);
+
+window.__film = {
+  SCRIPT, TOTAL, render,
+  seek(t){ S.playing = false; S.t = Math.max(0, Math.min(TOTAL - 1e-6, t)); render(S.t); }
+};
+</script>
+</body>
+</html>
